@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Sales API Serverless - POS System V1
+  
+  Serverless version of the POS system with product search and sale registration
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: java21
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        JAVA_TOOL_OPTIONS: -XX:+TieredCompilation -XX:TieredStopAtLevel=1
+
+Resources:
+  # API Gateway
+  SalesApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+
+  # ProductosLambda Function
+  ProductosLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: productos-lambda
+      Handler: com.supermarket.sales.serverless.productos.handler.ProductosHandler::handleRequest
+      Description: Lambda function for product search by barcode or name
+      Environment:
+        Variables:
+          PRODUCTOS_TABLE_NAME: !Ref TablaProductos
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TablaProductos
+      Events:
+        GetProductos:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SalesApi
+            Path: /productos
+            Method: GET
+
+  # VentasLambda Function
+  VentasLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ventas-lambda
+      Handler: com.supermarket.sales.serverless.ventas.handler.VentasHandler::handleRequest
+      Description: Lambda function for sale registration
+      Environment:
+        Variables:
+          VENTAS_TABLE_NAME: !Ref TablaVentas
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref TablaVentas
+      Events:
+        PostVentas:
+          Type: Api
+          Properties:
+            RestApiId: !Ref SalesApi
+            Path: /ventas
+            Method: POST
+
+  # TablaProductos DynamoDB Table
+  TablaProductos:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: TablaProductos
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: codigo_barras
+          AttributeType: S
+        - AttributeName: nombre
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: CodigoBarrasIndex
+          KeySchema:
+            - AttributeName: codigo_barras
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: NombreIndex
+          KeySchema:
+            - AttributeName: nombre
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Project
+          Value: SalesApiServerless
+        - Key: Environment
+          Value: Production
+
+  # TablaVentas DynamoDB Table
+  TablaVentas:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: TablaVentas
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: ventaId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ventaId
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Project
+          Value: SalesApiServerless
+        - Key: Environment
+          Value: Production
+
+  # CloudWatch Logs - ProductosLambda
+  ProductosLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProductosLambdaFunction}
+      RetentionInDays: 7
+
+  # CloudWatch Logs - VentasLambda
+  VentasLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${VentasLambdaFunction}
+      RetentionInDays: 7
+
+Outputs:
+  SalesApiUrl:
+    Description: "API Gateway endpoint URL for Prod stage"
+    Value: !Sub "https://${SalesApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+  
+  ProductosApiUrl:
+    Description: "URL for GET /productos endpoint"
+    Value: !Sub "https://${SalesApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/productos"
+  
+  VentasApiUrl:
+    Description: "URL for POST /ventas endpoint"
+    Value: !Sub "https://${SalesApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/ventas"
+  
+  ProductosLambdaArn:
+    Description: "ProductosLambda Function ARN"
+    Value: !GetAtt ProductosLambdaFunction.Arn
+  
+  VentasLambdaArn:
+    Description: "VentasLambda Function ARN"
+    Value: !GetAtt VentasLambdaFunction.Arn
+  
+  TablaProductosName:
+    Description: "TablaProductos DynamoDB Table Name"
+    Value: !Ref TablaProductos
+  
+  TablaVentasName:
+    Description: "TablaVentas DynamoDB Table Name"
+    Value: !Ref TablaVentas
