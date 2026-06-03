@@ -70,7 +70,8 @@ public class ProductRepository {
     }
     
     /**
-     * Query product by name using NombreIndex GSI.
+     * Query product by name using partial, case-insensitive matching.
+     * Performs a paginated scan and returns the first matching product.
      *
      * @param nombre the product name to search for
      * @return ProductDTO if found
@@ -80,29 +81,35 @@ public class ProductRepository {
         logger.info("Querying product by nombre: {}", nombre);
         
         try {
-            Map<String, AttributeValue> expressionAttributeValues = new HashMap<>();
-            expressionAttributeValues.put(":nombre", AttributeValue.builder().s(nombre).build());
+            String normalizedQuery = nombre == null ? "" : nombre.trim().toLowerCase();
+            Map<String, AttributeValue> exclusiveStartKey = null;
             
-            QueryRequest queryRequest = QueryRequest.builder()
-                    .tableName(tableName)
-                    .indexName("NombreIndex")
-                    .keyConditionExpression("nombre = :nombre")
-                    .expressionAttributeValues(expressionAttributeValues)
-                    .limit(1)
-                    .build();
+            do {
+                ScanRequest.Builder scanRequestBuilder = ScanRequest.builder()
+                        .tableName(tableName)
+                        .projectionExpression("id, nombre, codigo_barras, precio, categoria, descripcion, stock, unidad")
+                        .limit(50);
+                
+                if (exclusiveStartKey != null && !exclusiveStartKey.isEmpty()) {
+                    scanRequestBuilder.exclusiveStartKey(exclusiveStartKey);
+                }
+                
+                ScanResponse response = dynamoDbClient.scan(scanRequestBuilder.build());
+                
+                for (Map<String, AttributeValue> item : response.items()) {
+                    String itemNombre = getAttributeAsString(item, "nombre");
+                    if (itemNombre != null && itemNombre.toLowerCase().contains(normalizedQuery)) {
+                        ProductDTO product = mapItemToProductDTO(item);
+                        logger.info("Product found by nombre query: {}", product);
+                        return product;
+                    }
+                }
+                
+                exclusiveStartKey = response.lastEvaluatedKey();
+            } while (exclusiveStartKey != null && !exclusiveStartKey.isEmpty());
             
-            QueryResponse response = dynamoDbClient.query(queryRequest);
-            
-            if (response.items().isEmpty()) {
-                logger.warn("Product not found for nombre: {}", nombre);
-                throw new ProductNotFoundException("Product not found for name: " + nombre);
-            }
-            
-            Map<String, AttributeValue> item = response.items().get(0);
-            ProductDTO product = mapItemToProductDTO(item);
-            
-            logger.info("Product found: {}", product);
-            return product;
+            logger.warn("Product not found for nombre query: {}", nombre);
+            throw new ProductNotFoundException("Product not found for name: " + nombre);
             
         } catch (DynamoDbException e) {
             logger.error("DynamoDB error querying by nombre: {}", nombre, e);
@@ -112,25 +119,51 @@ public class ProductRepository {
     
     /**
      * Map DynamoDB item to ProductDTO.
-     * Safely reads optional attributes without NullPointerException.
+     * Safely reads required and optional attributes to avoid NullPointerException.
      *
      * @param item DynamoDB item
      * @return ProductDTO
      */
     private ProductDTO mapItemToProductDTO(Map<String, AttributeValue> item) {
         // Required fields
-        String id = item.get("id").s();
-        String nombre = item.get("nombre").s();
-        String codigoBarras = item.get("codigo_barras").s();
-        String precioStr = item.get("precio").n();
+        String id = getRequiredAttributeAsString(item, "id");
+        String nombre = getRequiredAttributeAsString(item, "nombre");
+        String codigoBarras = getRequiredAttributeAsString(item, "codigo_barras");
+        String precioStr = getRequiredAttributeAsString(item, "precio");
         BigDecimal precio = new BigDecimal(precioStr);
         
         // Optional fields - safe read pattern
-        String categoria = item.containsKey("categoria") ? item.get("categoria").s() : null;
-        String descripcion = item.containsKey("descripcion") ? item.get("descripcion").s() : null;
-        Integer stock = item.containsKey("stock") ? Integer.parseInt(item.get("stock").n()) : null;
-        String unidad = item.containsKey("unidad") ? item.get("unidad").s() : null;
+        String categoria = getAttributeAsString(item, "categoria");
+        String descripcion = getAttributeAsString(item, "descripcion");
+        String stockStr = getAttributeAsString(item, "stock");
+        Integer stock = stockStr != null && !stockStr.isEmpty() ? Integer.parseInt(stockStr) : null;
+        String unidad = getAttributeAsString(item, "unidad");
         
         return new ProductDTO(id, nombre, codigoBarras, precio, categoria, descripcion, stock, unidad);
+    }
+    
+    private String getRequiredAttributeAsString(Map<String, AttributeValue> item, String attributeName) {
+        String value = getAttributeAsString(item, attributeName);
+        if (value == null || value.isEmpty()) {
+            throw new IllegalStateException("Required attribute is missing or empty: " + attributeName);
+        }
+        return value;
+    }
+    
+    private String getAttributeAsString(Map<String, AttributeValue> item, String attributeName) {
+        AttributeValue value = item.get(attributeName);
+        if (value == null) {
+            return null;
+        }
+        
+        if (value.s() != null) {
+            return value.s();
+        }
+        
+        if (value.n() != null) {
+            return value.n();
+        }
+        
+        return null;
     }
 }
